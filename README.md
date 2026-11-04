@@ -9,10 +9,11 @@
 | `paths` | **数据到底存哪**。所有工具共用一套路径约定，绝不写"当前工作目录" |
 | `auth` | **登录态从哪来**。走 CDP 从已开的浏览器取 Cookie，不碰密码、不存密码 |
 | `store` | **多账号怎么不打架**。`accounts.json` 注册表 + 当前账号 + 端口分配 |
+| `launcher` | 用独立 profile 拉起带 CDP 的浏览器（多账号的物理基础） |
 | `api` | 创作者后台 40+ 接口的直连封装（纯 `requests`，不需要签名） |
 | `updater` | 历史版本归档 + 热更新（清单→下载→校验→暂存→换目录） |
 | `schedule` | 每日定时：进程内定时器 + Windows 计划任务（带 `.bat` 兜底） |
-| `context` | `ToolContext`：插件拿到的唯一通行证 |
+| `context` | `ToolContext`：插件拿到的唯一通行证（含 `ctx.accounts` 账号管理） |
 | `standalone` | 让插件"不靠宿主也能跑"的那几十行 |
 
 ## 安装
@@ -44,6 +45,36 @@ print(api.can_create())                     # 今日还能发几首
 print(api.trend(metric=2, period=2))        # 汽水播放量 7 日趋势
 print(api.traffic_pie(song_id="74xxxx"))    # 单曲流量饼图（含冷启动 cat=1）
 ```
+
+## 账号管理：`ctx.accounts`（`api_version >= 2`）
+
+插件**不许**直接读写 `accounts.json`。账号表里放着端口、profile 路径、当前账号，
+随便改就会出三件事：别的插件的账号被改掉、两个账号抢同一个 profile 互相顶登录、
+以及"新槽位 uid 空着却显示成别人的曲库"这种最难查的串号。所以只开一扇带语义的门：
+
+```python
+A = ctx.accounts
+A.list(True)              # 全部条目（含「分配了端口但还没登录」的槽位）
+A.real()                  # 已登录的账号，按端口升序（主号在前）
+A.register("新账号")      # 建槽位：自动分配端口 + 独立 profile
+A.bind(port, uid)         # 登录成功后回填 uid
+A.set_uid(old, new)       # 按实际登录的账号重写登记（校正 uid）
+A.remove(port=..)         # 移除登记（待登录槽位 uid 空，只能按端口认）
+A.set_current(uid)        # 切当前账号，宿主会广播给所有插件
+A.stats(uid)              # {total, plays, date, has_data}
+A.probe(port)             # {online, login, uid} 活体实况
+A.launch(port, profile)   # 拉起带 CDP 的浏览器（窗口默认开在屏幕外）
+A.clear_login(port)       # 退出登录：清空**全部** Cookie 并回创作者后台
+```
+
+`set_current()` 必须走宿主：只改注册表不改各插件的 ctx，抓取会静默抓到上一个账号
+的数据。这类串号查起来极费劲，所以内核里把它做成一条路。
+
+**`stats("")` 必须返回空**，不能因为 `uid` 空就回退到"当前账号"的目录——
+否则新加的槽位会显示成别人的曲库。
+
+**`uid_tt` 每次重新登录都会变。** 拿它比对登记 uid 会把同一个号误报成
+「被其它账号占用」。判定"这个槽位里是谁"时，只有两边都有值才比，比不上就别报警。
 
 ## 数据放哪：一个环境变量说了算
 

@@ -15,6 +15,14 @@
     ctx.schedule.daily(lambda: run(), "07:30")
     ctx.on_account_switch(lambda uid: reset(uid))
 
+    # 账号管理（api_version >= 2）
+    for a in ctx.accounts.list():
+        print(a["name"], ctx.accounts.stats(a["uid"])["total"])
+    acc = ctx.accounts.register("新账号")        # 端口 + 独立 profile 都分好
+    ctx.accounts.bind(acc["port"], uid)          # 登录成功后回填
+    ctx.accounts.clear_login(acc["port"])        # 退出登录
+    ctx.accounts.set_current(uid)                # 切当前账号（宿主会广播）
+
 ctx 里每一个能力都由宿主实现。插件不碰路径、不碰端口、不碰账号表——
 这三样是最容易写错的，收归宿主后插件只剩业务。
 
@@ -155,6 +163,201 @@ class PluginSettings(object):
         return dict(d)
 
 
+# ==================================================================== 账号
+class PluginAccounts(object):
+    """账号管理能力（api_version >= 2）——`ctx.accounts`。
+
+    为什么插件不准直接 `import store` 改账号表
+    ------------------------------------------
+    账号表里放着端口、profile 路径、当前账号。任何一个插件都能随手改，
+    就会出三件事：别的插件的账号被改掉、两个账号抢同一个 profile 互相顶登录、
+    以及"新槽位 uid 空着却显示成别人的曲库"这种最难查的串号。
+
+    所以这里只开一扇**带语义**的门：新槽位走 register()、登录成功走 bind()、
+    移除走 remove()，每一步都做该做的收尾（端口回收、当前账号兜底）。
+    插件拿不到写文件的自由，只能做对的动作。
+    """
+
+    def __init__(self, ctx):
+        self._ctx = ctx
+
+    # ------------------------------------------------ 读
+    def list(self, with_pending=True):
+        """全部条目。with_pending=True 时含「已分配端口但还没登录」的槽位。"""
+        return (core_store.entries(True) if with_pending
+                else core_store.real_accounts())
+
+    def real(self):
+        """已完成登录的账号，按端口升序。"""
+        return core_store.real_accounts()
+
+    def get(self, uid):
+        return core_store.get(uid) or {}
+
+    def by_port(self, port):
+        try:
+            return core_store.by_port(int(port)) or {}
+        except Exception:
+            return {}
+
+    def current_uid(self):
+        return core_store.get_current_uid()
+
+    def default_uid(self):
+        return core_store.default_uid()
+
+    def main_uid(self):
+        return core_store.main_uid()
+
+    def stats(self, uid):
+        """{total, plays, date, has_data}。uid 空着就全空，绝不回退到别人目录。"""
+        return core_store.stats(uid)
+
+    def data_dir(self, uid=None):
+        """账号数据目录。
+
+        注意 `None`（不传）和 `""`（明确空 uid）是两件事：
+        None 表示"当前账号"，`""` 表示"还没登录的槽位"（落到 `accounts/_pending`）。
+        混为一谈就会让新槽位显示成当前账号的曲库——这是最难查的一类串号。
+        """
+        return core_store.data_dir(self._ctx.uid if uid is None else uid)
+
+    def port_of(self, uid):
+        try:
+            return int(self.get(uid).get("port") or 0)
+        except Exception:
+            return 0
+
+    def profile_of(self, uid):
+        return self.get(uid).get("profile") or ""
+
+    def is_ghost(self, uid):
+        return core_store.is_ghost(uid)
+
+    def suggestions(self):
+        """给「从已有数据目录补登」用的候选：磁盘上有数据但注册表里没登记。"""
+        return [a for a in core_store.entries(True)
+                if a.get("uid") and not core_store.get(a.get("uid"))]
+
+    # ------------------------------------------------ 写
+    def register(self, name="", note=""):
+        """新建「待登录」槽位：自动分配端口 + 独立 profile，uid 等登录后回填。"""
+        acc = core_store.register(name, note)
+        self._ctx.log("新建账号槽位「%s」：端口 %s" % (acc.get("name"), acc.get("port")))
+        return acc
+
+    def bind(self, port, uid, name=None):
+        """登录成功后把 uid 填进这个端口的槽位。"""
+        acc = core_store.bind_slot(int(port), uid, name)
+        self._ctx.log("登录回填：端口 %s → uid=%s" % (port, uid))
+        return acc
+
+    def set_uid(self, old_uid, new_uid, name=None):
+        """按实际登录的账号重写登记（校正 uid 用）。"""
+        acc = core_store.set_uid(old_uid, new_uid, name)
+        self._ctx.log("校正 uid：%s → %s" % (old_uid or "(空槽位)", new_uid))
+        return acc
+
+    def rename(self, uid, name):
+        return core_store.upsert({"uid": uid, "name": str(name or "")})
+
+    def set_note(self, uid, note):
+        return core_store.upsert({"uid": uid, "note": str(note or "")})
+
+    def set_order(self, uids):
+        return core_store.set_order(list(uids or []))
+
+    def remove(self, uid="", port=0):
+        """从注册表移除一条。
+
+        待登录槽位的 uid 是空的，按 uid 认不出来，所以必须能按端口兜底。
+        只删登记，磁盘上 accounts/<uid>/ 的数据和 browser/ 里的 profile 都留着。
+        """
+        if uid:
+            ok = core_store.remove(uid)
+        elif port:
+            ok = core_store.remove_by_port(int(port))
+        else:
+            return False
+        self._ctx.log(("已移除 %s" % (uid or ("端口 %s" % port))) if ok
+                      else "移除失败：注册表里没找到")
+        return ok
+
+    def set_current(self, uid, port=None):
+        """切「当前账号」，并让宿主通知所有插件。
+
+        必须走宿主：只改注册表不改 ctx 的话，其它插件还拿着老端口，
+        抓取会静默抓到上一个账号的数据——这类串号查起来极费劲。
+        """
+        uid = str(uid or "")
+        if not uid:
+            return False
+        p = int(port if port is not None else self.port_of(uid))
+        core_store.set_current_uid(uid)
+        host = getattr(self._ctx, "_host", None)
+        try:
+            if host is not None and hasattr(host, "on_account_switch"):
+                host.on_account_switch(uid, p)
+                return True
+        except Exception as e:
+            self._ctx.warn("通知宿主切号失败：%s" % e)
+        self._ctx.set_account(uid, p)
+        self._ctx.fire_account_switch(uid, p)
+        return True
+
+    # ------------------------------------------------ 浏览器（活体）
+    def alive(self, port):
+        """这个端口的 CDP 浏览器开着没有。"""
+        try:
+            return bool(auth.discover_ws(int(port)))
+        except Exception:
+            return False
+
+    def launch(self, port, profile="", url="", timeout=20):
+        """用独立 profile 拉起带 CDP 的浏览器（已开着就复用）。返回 (ok, msg)。"""
+        from . import launcher as L
+        return L.launch_account(int(port), profile or core_store.make_profile("acct%d" % int(port)),
+                                url or L.LOGIN_URL, timeout=timeout)
+
+    def kill(self, port, timeout=8):
+        from . import launcher as L
+        return L.kill_port(int(port), timeout)
+
+    def ensure_browser(self, port, profile="", url="", timeout=20):
+        """确保端口上有可用的 CDP 浏览器，返回 page 级 ws（失败抛异常）。"""
+        if not self.alive(port):
+            ok, msg = self.launch(port, profile, url, timeout)
+            if not ok:
+                raise RuntimeError(msg)
+            import time
+            for _ in range(24):
+                if self.alive(port):
+                    break
+                time.sleep(0.5)
+            else:
+                raise RuntimeError("浏览器已启动，但调试端口未就绪")
+        ws = auth.page_ws(int(port))
+        if not ws:
+            raise RuntimeError("没有可用的浏览器标签页（请在浏览器里开一个窗口）")
+        return ws
+
+    def probe(self, port, timeout=15):
+        """{online, login, uid, err} —— 活体实况。"""
+        return auth.probe(int(port), timeout)
+
+    def cookies(self, port, timeout=15):
+        return auth.live_cookies(int(port), timeout)
+
+    def clear_login(self, port, timeout=20):
+        """退出登录：清空该浏览器全部 Cookie 并回创作者后台。返回清掉的条数。"""
+        n = auth.clear_cookies(int(port), timeout=timeout)
+        self._ctx.log("已清除端口 %s 的 Cookie %d 条" % (port, n))
+        return n
+
+    def __repr__(self):
+        return "<PluginAccounts n=%d>" % len(self.list())
+
+
 # ==================================================================== 定时
 class PluginSchedule(object):
     """插件定时：默认按 `<pid>:<name>` 命名，避免两个插件抢同一个 task_id。"""
@@ -214,6 +417,7 @@ class ToolContext(object):
         self.settings = PluginSettings(self.store)
         self._log_path = self.store.path("_log.txt")
         self._switch_cbs = []
+        self._accounts = None
 
     # ------------------------------------------------ 日志
     def log(self, msg, level="info"):
@@ -272,6 +476,13 @@ class ToolContext(object):
     @property
     def auth(self):
         return auth
+
+    @property
+    def accounts(self):
+        """账号管理（列/建/绑/删/切/探测/拉起/退出登录）。见 PluginAccounts。"""
+        if getattr(self, "_accounts", None) is None:
+            self._accounts = PluginAccounts(self)
+        return self._accounts
 
     @property
     def schedule(self):

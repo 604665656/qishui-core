@@ -102,7 +102,35 @@ def main():
     s.remove("t1")
     check("删除后登记为空", "t1" not in s.tasks())
 
-    check("API_VERSION 与插件契约一致", API_VERSION == 1)
+    # ---- 账号管理能力（api_version 2） ----
+    from qishui_core.context import ToolContext
+    from qishui_core import auth as _auth
+    ctx = ToolContext("smoke-acct")
+    A = ctx.accounts
+    check("ctx.accounts 可用", A is not None)
+    n0 = len(A.list())
+    acc = A.register("冒烟账号")
+    check("register 分配了端口", int(acc["port"]) >= 9222, acc["port"])
+    check("register 分配了独立 profile", bool(acc["profile"]))
+    check("register 后列表 +1", len(A.list()) == n0 + 1)
+    check("待登录槽位 uid 为空", acc["uid"] == "")
+    check("待登录槽位统计全空", A.stats("")["total"] == 0 and not A.stats("")["has_data"])
+    A.bind(acc["port"], "u-smoke")
+    got = A.by_port(acc["port"])
+    check("bind 回填 uid", got.get("uid") == "u-smoke", got.get("uid"))
+    A.rename("u-smoke", "改过名")
+    check("rename 生效", A.get("u-smoke").get("name") == "改过名")
+    check("set_order 不炸", isinstance(A.set_order(["u-smoke"]), list))
+    check("幽灵 uid 识别", A.is_ghost("f" * 16) and not A.is_ghost("abc123"))
+    check("按端口移除槽位", A.remove(port=acc["port"]) and not A.by_port(acc["port"]))
+    check("数据目录跟着 uid",
+          A.data_dir("u-smoke").endswith(os.path.join("accounts", "u-smoke")))
+    check("空 uid 落到 _pending", A.data_dir("").endswith("_pending"))
+    check("未开的端口 probe 返回 offline",
+          _auth.probe(9399)["online"] is False)
+    check("page_ws 对空端口不抛异常", _auth.page_ws(9399) == "")
+
+    check("API_VERSION 与插件契约一致", API_VERSION == 2)
     print("\n全部通过：%d 项" % ok)
     return 0
 
