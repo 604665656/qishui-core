@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+dist_*/
+.venv/
+venv/
+.idea/
+.vscode/
+*.spec.bak
+_update/
+_staged/
+_versions/
+*_test_home/
+_pycache*/
+.DS_Store

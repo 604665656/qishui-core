@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qishui-core"
+version = "1.0.0"
+description = "汽水音乐工具箱公共内核：路径约定 / 登录态 / 账号注册表 / 后台接口 / 历史版本与热更新 / 每日定时"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "604665656" }]
+keywords = ["qishui", "douyin", "dashboard", "plugin", "core"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+]
+dependencies = ["requests>=2.28"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/604665656/qishui-core"
+
+[tool.setuptools]
+packages = ["qishui_core"]
