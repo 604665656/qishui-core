@@ -22,7 +22,21 @@ _LOGIN_KEYS = ("sessionid", "sessionid_ss", "sid_tt", "uid_tt")
 
 
 # ---------------- 端口 ----------------
-def port_alive(port, timeout=1.5):
+# 一次「全端口探测失败」后，短期内不要再探。
+# 为什么必须有：没开浏览器时，每个接口失败都会调一次 cookies()→find_port()，
+# 而 find_port 要逐个连 4 个端口 + 各自 /json/version，一轮约十几秒；
+# 同步类插件一次跑十几个接口，就会累积成几分钟的假死（faulthandler 实测
+# 卡在 socket.create_connection）。浏览器开着时探测一次即命中，不会有负缓存。
+_NO_PORT_UNTIL = [0.0]
+_NO_PORT_TTL = 20.0
+
+
+def clear_no_port_cache():
+    """浏览器刚拉起时手动清掉负缓存（launcher 会调）。"""
+    _NO_PORT_UNTIL[0] = 0.0
+
+
+def port_alive(port, timeout=0.4):
     try:
         with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout):
             return True
@@ -30,7 +44,7 @@ def port_alive(port, timeout=1.5):
         return False
 
 
-def cdp_version(port, timeout=3):
+def cdp_version(port, timeout=1.5):
     try:
         raw = urllib.request.urlopen("http://127.0.0.1:%d/json/version" % int(port),
                                      timeout=timeout).read()
@@ -40,7 +54,12 @@ def cdp_version(port, timeout=3):
 
 
 def find_port(prefer=None, extra=()):
-    """找一个能连上的 CDP 端口。prefer 优先，其次 DEFAULT_PORTS，最后 extra。"""
+    """找一个能连上的 CDP 端口。prefer 优先，其次 DEFAULT_PORTS，最后 extra。
+
+    全失败时记 20 秒负缓存，避免「每个接口都重探 4 个端口」造成的假死。
+    """
+    if time.time() < _NO_PORT_UNTIL[0]:
+        return 0
     cands = []
     if prefer:
         cands.append(int(prefer))
@@ -48,7 +67,9 @@ def find_port(prefer=None, extra=()):
     cands += [int(p) for p in extra if int(p) not in cands]
     for p in cands:
         if port_alive(p) and cdp_version(p):
+            _NO_PORT_UNTIL[0] = 0.0
             return p
+    _NO_PORT_UNTIL[0] = time.time() + _NO_PORT_TTL
     return 0
 
 
